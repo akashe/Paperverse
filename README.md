@@ -51,10 +51,10 @@ Click on any paper to discover its most influential derivatives. Perfect for:
    
 Run FASTAPI backend app:
 ```
-cd citation-network-backend
 mkdir data
 python3 -m venv .venv
 source .venv/bin/activate
+cd citation-network-backend
 pip install -r requirements.txt 
 
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
