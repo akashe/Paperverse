@@ -18,10 +18,24 @@ const firebaseConfig = {
 };
 
 
-const app = initializeApp(firebaseConfig);
+// The original Firebase project has been retired, so this config is
+// intentionally unset. initializeApp() throws on an invalid/missing config,
+// and that throw happens at module-load time (before React mounts) — left
+// unguarded, it takes down the entire app with a blank screen. Auth/reading-
+// list features are disabled (app/auth/db stay null); core graph exploration
+// doesn't depend on Firebase at all.
+let app = null;
+let auth = null;
+let db = null;
 
-// Initialize Firebase
-const auth = getAuth(app);
-const db = getFirestore(app);
+if (firebaseConfig.apiKey) {
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  } catch (e) {
+    console.error('Firebase initialization failed; auth/reading-list disabled.', e);
+  }
+}
 
 export { app, auth, db };

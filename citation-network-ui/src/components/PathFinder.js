@@ -80,8 +80,8 @@ function PathFinder() {
   
     try {
       const response = await axios.post('/find_paths/', {
-        start_id: parseInt(selectedPaper1),
-        end_id: parseInt(selectedPaper2),
+        start_id: selectedPaper1,
+        end_id: selectedPaper2,
       });
   
       // If we should cancel, don't update the state with the response

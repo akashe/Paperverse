@@ -1,0 +1,22 @@
+# Shared-VM deployment — layered on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This VM also runs ResearchQuest (a separate compose project). No host ports
+# are published here — ResearchQuest's nginx (its own compose project) joins
+# the `shared-web` Docker network below and reverse-proxies to `frontend`
+# directly by container name, terminating TLS for paperverse.co there.
+# `frontend`'s own bundled nginx (nginx/nginx.conf) still handles the
+# static-file vs /api split internally, proxying /api/ to `backend:8000`.
+#
+# One-time setup on the VM before first `up`: docker network create shared-web
+
+services:
+  frontend:
+    ports: !override []
+    networks:
+      - default
+      - shared-web
+
+networks:
+  shared-web:
+    external: true

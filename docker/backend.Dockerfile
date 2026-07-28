@@ -18,10 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY citation-network-backend/ .
 
-# Create necessary directories
-RUN mkdir -p data/bfs_trees data/pngs && \
-    curl -o data/citations_data.db https://gifs-and-vids.s3.amazonaws.com/citations_data.db 
-
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV MODULE_NAME=app

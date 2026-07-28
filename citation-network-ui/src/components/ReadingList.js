@@ -22,22 +22,22 @@ function ReadingList() {
         const list = docSnap.data().readingList || [];
         setReadingList(list);
 
-        // Fetch paper details for display
-        try {
-          const responses = await Promise.all(
-            list.map(paperId => axios.post('/get_paper_info/', { paper_id: parseInt(paperId) }))
-          );
-          const papersData = {};
-          responses.forEach((res, index) => {
-            papersData[list[index]] = res.data;
-          });
-          setPapers(papersData);
-          setLoading(false);
-        } catch (err) {
-          console.error('Error fetching paper details:', err);
-          setError('Failed to load paper details.');
-          setLoading(false);
-        }
+        // Fetch paper details for display. Use allSettled, not all — one
+        // paper failing to load (e.g. a stale id no longer in the graph)
+        // shouldn't blank out the whole list.
+        const results = await Promise.allSettled(
+          list.map(paperId => axios.post('/get_paper_info/', { paper_id: paperId }))
+        );
+        const papersData = {};
+        results.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            papersData[list[index]] = result.value.data;
+          } else {
+            console.error(`Error fetching details for paper ${list[index]}:`, result.reason);
+          }
+        });
+        setPapers(papersData);
+        setLoading(false);
       } else {
         setReadingList([]);
         setLoading(false);
