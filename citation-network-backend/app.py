@@ -1,13 +1,16 @@
-import pdb
+import os
+import random
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from neo4j import GraphDatabase
 from pydantic import BaseModel
-import sqlite3
-import time
-import random
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 app = FastAPI(root_path="/api")
 
@@ -22,34 +25,50 @@ app.add_middleware(
 
 app.mount("/templates", StaticFiles(directory="templates"), name="templates")
 
-DATABASE = 'data/citations_data.db'
+driver = GraphDatabase.driver(
+    os.getenv("NEO4J_URI"),
+    auth=(os.getenv("NEO4J_USER"), os.getenv("NEO4J_PASSWORD")),
+    connection_timeout=300,
+)
 
 
+def run_query(query, params=None):
+    with driver.session() as session:
+        return [record.data() for record in session.run(query, params or {})]
+
+
+# Paper ids are Semantic Scholar paper ids (opaque hash strings), not the
+# sequential ints the old SQLite-backed Nodes table used.
 class PaperSearchRequest(BaseModel):
     query: str
 
 
 class TreeRequest(BaseModel):
-    paper_id: int
+    paper_id: str
     depth: int
 
+
 class PaperRequest(BaseModel):
-    paper_id: int
+    paper_id: str
+
 
 class ChildrenRequest(BaseModel):
-    paper_id: int
-    root_id: int
+    paper_id: str
+    root_id: str
     depth: int
     num_papers: int
     selection_criteria: str
 
+
 class PathRequest(BaseModel):
-    start_id: int
-    end_id: int
+    start_id: str
+    end_id: str
+
 
 @app.get("/")
 async def read_root():
     return FileResponse('templates/index.html')
+
 
 @app.get("/path")
 async def get_path_finder():
@@ -58,30 +77,16 @@ async def get_path_finder():
 
 @app.post("/search_papers/")
 async def search_papers(request: PaperSearchRequest):
-    try:
-        conn = sqlite3.connect(DATABASE)
-        c = conn.cursor()
-
-        # Add index if it doesn't exist (do this during initialization)
-        c.execute("""
-                CREATE INDEX IF NOT EXISTS idx_nodes_label 
-                ON Nodes(label, pageRank DESC);
-            """)
-        conn.commit()
-
-        c.execute("""
-                SELECT id, label, year, citationCount, pageRank 
-                FROM Nodes 
-                WHERE label LIKE ? 
-                ORDER BY pageRank DESC
-                LIMIT 10
-                """, (f"%{request.query}%",))
-        papers = c.fetchall()
-        conn.close()
-        return [{"id": paper[0], "label": paper[1].replace(r"\n", "")} for paper in papers]
-    finally:
-        if 'conn' in locals():
-            conn.close()
+    results = run_query(
+        """
+        CALL db.index.fulltext.queryNodes('paperAbstractIndex', $query) YIELD node, score
+        RETURN node.id AS id, node.label AS label
+        ORDER BY node.pageRank DESC
+        LIMIT 10
+        """,
+        {"query": request.query},
+    )
+    return [{"id": r["id"], "label": (r["label"] or "").replace(r"\n", "")} for r in results]
 
 
 @app.post("/generate_tree/")
@@ -91,95 +96,90 @@ async def generate_tree(request: TreeRequest, background_tasks: BackgroundTasks)
 
 @app.post("/get_root_info/")
 async def get_root_info(request: TreeRequest):
-    # TODO: get root info should not be called until rest of the graph is generated in UI
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    table_name = f"Tree_{request.paper_id}_{request.depth}"
-    c.execute(f"SELECT * FROM Nodes WHERE id = ?", (request.paper_id,))
-    paper_info = c.fetchone()
-    conn.close()
-    if not paper_info:
+    results = run_query(
+        """
+        MATCH (p:Paper {id: $paper_id})
+        RETURN p.id AS id, p.label AS label, p.year AS year,
+               p.citationCount AS citationCount, p.url AS url, p.pageRank AS pageRank
+        """,
+        {"paper_id": request.paper_id},
+    )
+    if not results:
         raise HTTPException(status_code=404, detail="Paper not found")
+    paper_info = results[0]
     return {
-        'id': paper_info[0],
-        'label': paper_info[1].replace(r"\n", ""),
-        'year': paper_info[2],
-        'citationCount': paper_info[3],
-        'url': paper_info[4],
-        'pageRank': paper_info[4]
+        'id': paper_info["id"],
+        'label': (paper_info["label"] or "").replace(r"\n", ""),
+        'year': paper_info["year"],
+        'citationCount': paper_info["citationCount"],
+        'url': paper_info["url"],
+        'pageRank': paper_info["pageRank"],
     }
 
 
 @app.post("/get_paper_info/")
 async def get_paper_info(request: PaperRequest):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-
-    # Fetch the URL of the paper from the Nodes table
-    c.execute("SELECT label, year, citationCount, url FROM Nodes WHERE id = ?", (request.paper_id,))
-    print(request.paper_id)
-    paper_results = c.fetchone()
-    if not paper_results:
-        conn.close()
+    results = run_query(
+        """
+        MATCH (p:Paper {id: $paper_id})
+        RETURN p.id AS id, p.label AS label, p.year AS year, p.citationCount AS citationCount,
+               p.url AS url, p.abstract AS abstract, p.arxiv_id AS arxiv_id,
+               p.published_date AS published_date, p.tldr AS tldr
+        """,
+        {"paper_id": request.paper_id},
+    )
+    if not results:
         raise HTTPException(status_code=404, detail="Paper not found in Nodes table")
-    label = paper_results[0]
-    year = paper_results[1]
-    citationCount = paper_results[2]
-    paper_url = paper_results[3]
-
-    # Fetch paper details from the Paper_info table using the URL
-    c.execute("SELECT arxiv_id, citationCount, year, semantic_id, url, abstract, title, published_date, tldr FROM Paper_info WHERE url = ?", (paper_url,))
-    paper_info = c.fetchone()
-    print(paper_info)
-    conn.close()
-    if not paper_info:
+    p = results[0]
+    # arxiv_id/published_date/tldr only exist for papers that were in the
+    # original arXiv-sourced set (enriched from arxiv_papers_with_semantic_scholar_ids.csv) -
+    # papers pulled in only via citation expansion won't have them.
+    if p["arxiv_id"] is None:
         return {
             "arxiv_id": "No information available",
-            "citationCount": citationCount,
-            "year": year,
-            "semantic_id": "No information available",
-            "url": paper_url,
-            "title": label,
+            "citationCount": p["citationCount"],
+            "year": p["year"],
+            "semantic_id": p["id"],
+            "url": p["url"],
+            "title": (p["label"] or "").replace(r"\n", ""),
             "published_date": "N/A",
-            "tldr": "No information available"
+            "tldr": "No information available",
         }
     return {
-        "arxiv_id": paper_info[0],
-        "citationCount": paper_info[1],
-        "year": paper_info[2],
-        "semantic_id": paper_info[3],
-        "url": paper_info[4],
-        "title": paper_info[6],
-        "published_date": paper_info[7], #TODO: change db field orientation
-        "tldr": paper_info[5]
+        "arxiv_id": p["arxiv_id"],
+        "citationCount": p["citationCount"],
+        "year": p["year"],
+        "semantic_id": p["id"],
+        "url": p["url"],
+        "title": (p["label"] or "").replace(r"\n", ""),
+        "published_date": p["published_date"] or "N/A",
+        "tldr": p["tldr"] or "No information available",
     }
 
 
 @app.post("/get_children/")
 async def get_children(request: ChildrenRequest):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
+    # Influential derivatives: papers that cite this one, i.e. incoming CITES edges.
+    results = run_query(
+        """
+        MATCH (p:Paper)-[:CITES]->(:Paper {id: $paper_id})
+        RETURN p.id AS id, p.label AS label, p.citationCount AS citationCount,
+               p.url AS url, p.pageRank AS pageRank
+        """,
+        {"paper_id": request.paper_id},
+    )
 
-    # Get all children directly from the edges table
-    c.execute('''
-        SELECT n.* 
-        FROM PaperEdges e 
-        JOIN Nodes n ON e.target_id = n.id 
-        WHERE e.source_id = ?
-        LIMIT 9999
-    ''', (request.paper_id,))
-    
-    children_info = []
-    for paper_info in c.fetchall():
-        children_info.append({
-            'id': paper_info[0],
-            'label': paper_info[1].replace(r"\n", ""),
-            'citationCount': paper_info[3],
-            'url': paper_info[4],
-            'pageRank': paper_info[5]
-        })
+    children_info = [
+        {
+            'id': r["id"],
+            'label': (r["label"] or "").replace(r"\n", ""),
+            'citationCount': r["citationCount"],
+            'url': r["url"],
+            'pageRank': r["pageRank"],
+        }
+        for r in results
+    ]
 
-    # Apply sorting based on selection criteria
     if request.selection_criteria == 'citationCount':
         children_info.sort(key=lambda x: x['citationCount'], reverse=True)
     elif request.selection_criteria == 'pageRank':
@@ -187,55 +187,41 @@ async def get_children(request: ChildrenRequest):
     elif request.selection_criteria == 'random':
         random.shuffle(children_info)
 
-    # Apply limit if specified
     if request.num_papers > 0:
         children_info = children_info[:request.num_papers]
 
-    conn.close()
     return children_info
 
 
 @app.post("/find_paths/")
 async def find_path(request: PathRequest):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    
-    def bfs_path(start_id, end_id):
-        queue = [(start_id, [start_id])]
-        visited = {start_id}
-        
-        while queue:
-            (vertex, path) = queue.pop(0)
-            # Get all neighbors from PaperEdges table
-            c.execute('SELECT target_id FROM PaperEdges WHERE source_id = ?', (vertex,))
-            for neighbor, in c.fetchall():
-                if neighbor == end_id:
-                    return path + [neighbor]
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, path + [neighbor]))
-        return None
+    results = run_query(
+        """
+        MATCH (start:Paper {id: $start_id}), (end:Paper {id: $end_id})
+        MATCH path = shortestPath((start)-[:CITES*..15]-(end))
+        RETURN [n IN nodes(path) | {
+            id: n.id, label: n.label, year: n.year,
+            citationCount: n.citationCount, pageRank: n.pageRank
+        }] AS path
+        """,
+        {"start_id": request.start_id, "end_id": request.end_id},
+    )
 
-    path = bfs_path(request.start_id, request.end_id)
-    
-    if path:
-        # Get paper details for each node in path
-        path_details = []
-        for node_id in path:
-            c.execute('SELECT id, label, year, citationCount, pageRank FROM Nodes WHERE id = ?', (node_id,))
-            details = c.fetchone()
-            path_details.append({
-                'id': details[0],
-                'label': details[1],
-                'year': details[2],
-                'citationCount': details[3],
-                'pageRank': details[4]
-            })
-        conn.close()
-        return {'path': path_details}
-    
-    conn.close()
-    raise HTTPException(status_code=404, detail="No path found")
+    if not results or not results[0]["path"]:
+        raise HTTPException(status_code=404, detail="No path found")
+
+    path_details = [
+        {
+            'id': n["id"],
+            'label': n["label"],
+            'year': n["year"],
+            'citationCount': n["citationCount"],
+            'pageRank': n["pageRank"],
+        }
+        for n in results[0]["path"]
+    ]
+    return {'path': path_details}
+
 
 @app.get("/health")
 async def health_check():

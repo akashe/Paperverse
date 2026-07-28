@@ -3,6 +3,14 @@ services:
     build:
       context: .
       dockerfile: docker/frontend.Dockerfile
+      args:
+        REACT_APP_FIREBASE_API_KEY: ${REACT_APP_FIREBASE_API_KEY}
+        REACT_APP_FIREBASE_AUTH_DOMAIN: ${REACT_APP_FIREBASE_AUTH_DOMAIN}
+        REACT_APP_FIREBASE_PROJECT_ID: ${REACT_APP_FIREBASE_PROJECT_ID}
+        REACT_APP_FIREBASE_STORAGE_BUCKET: ${REACT_APP_FIREBASE_STORAGE_BUCKET}
+        REACT_APP_FIREBASE_MESSAGING_SENDER_ID: ${REACT_APP_FIREBASE_MESSAGING_SENDER_ID}
+        REACT_APP_FIREBASE_APP_ID: ${REACT_APP_FIREBASE_APP_ID}
+        REACT_APP_FIREBASE_MEASUREMENT_ID: ${REACT_APP_FIREBASE_MEASUREMENT_ID}
     ports:
       - "3000:80"
     depends_on:
@@ -18,9 +26,8 @@ services:
       - "8000:8000"
     volumes:
       - ./citation-network-backend:/app
-      - ./data:/app/data
-    environment:
-      - DATABASE_URL=sqlite:///./data/citations_data.db
+    env_file:
+      - .env
 
 networks:
   default:

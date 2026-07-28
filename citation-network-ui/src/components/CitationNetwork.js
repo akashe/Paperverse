@@ -135,7 +135,7 @@ function CitationNetwork() {
     setLoading(true);
     axios
       .post('/generate_tree/', {
-        paper_id: parseInt(selectedPaper),
+        paper_id: selectedPaper,
         depth: parseInt(depth),
       })
       .then((response) => {
@@ -158,7 +158,7 @@ function CitationNetwork() {
   const loadRootNode = () => {
     axios
       .post('/get_root_info/', {
-        paper_id: parseInt(selectedPaper),
+        paper_id: selectedPaper,
         depth: parseInt(depth),
       })
       .then((response) => {

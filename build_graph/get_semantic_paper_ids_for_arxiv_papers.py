@@ -10,8 +10,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore
 
-# Define your Semantic Scholar API key
-SEMANTIC_SCHOLAR_API_KEY = "XQRDiSXgS59uq91YOLadF2You3c4XFvv3MmXKU4o"
+# Define your Semantic Scholar API url
 SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1"
 
 # Define the fields to be retrieved
@@ -53,40 +52,55 @@ def load_processed_paper_ids(filename="citations.jsonl"):
 
 
 # Function to fetch papers for a given year with pagination
-def fetch_paper_ids(request_ids, max_retries=3):
+def fetch_paper_ids(request_ids, max_retries=8):
     failed_response = "failed"
     url = f"{SEMANTIC_SCHOLAR_API_URL}/paper/batch/"
     params = {'fields': fields}
     json_ = {"ids": request_ids}
 
-    for attempt in range(max_retries):
+    backoff_base = 2
+
+    for attempt in range(0,max_retries):
         try:
             response = requests.post(url,
                                      params=params,
                                      json=json_,
-                                     headers={'x-api-key': SEMANTIC_SCHOLAR_API_KEY}).json()
-
+                                    #  headers={'x-api-key': SEMANTIC_SCHOLAR_API_KEY}
+                                     ).json()
+            
             if not ('message' in response or 'error' in response):
-                return response
+                return "", response
+            
+            if 'error' in response and response['error'] == 'No valid paper ids given':
+                return failed_response, "_"
+            
+            if ('message' in response or 'error' in response):
+                wait_time = backoff_base ** attempt
+                print(f"Error in response (attempt {attempt + 1}): {response}. Retrying in {wait_time} seconds.")
+                time.sleep(wait_time)
+            # if len(response)!=500:
+            #     print(f"Received {len(response)} results for {len(request_ids)} IDs, expected 500.")
         except Exception as e:
-            print(f"Error fetching papers (attempt {attempt + 1}): {response}")
-            time.sleep(40)  # Wait before retrying
+            print(f"Exception fetching papers (attempt {attempt + 1}): {e}")
+            wait_time = backoff_base ** attempt
+            time.sleep(wait_time)
 
-    time.sleep(60)  # Wait 60 seconds between requests
+    # time.sleep(60)  # Wait 60 seconds between requests
 
-    return failed_response
+    return failed_response, response
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--new_data", action="store_true", 
-                       help="Process new data from arxiv_data_new.pkl")
-    #python get_semantic_paper_ids_for_arxiv_papers.py --new_data
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--new_data", action="store_true", 
+    #                    help="Process new data from arxiv_data_new.pkl")
+    # #python get_semantic_paper_ids_for_arxiv_papers.py --new_data
+    # args = parser.parse_args()
 
+    args_new_data = False
     
     # Read arxiv paper ids
-    input_file = "data/arxiv_data_new.pkl" if args.new_data else "data/arxiv_data.pkl"
+    input_file = "data/arxiv_data_new.pkl" if args_new_data else "data/arxiv_data.pkl"
     df = pd.read_pickle(input_file)
 
     df_keys = df['id'].tolist()
@@ -96,28 +110,37 @@ def main():
     failed_paper_ids = []
     paper_results = []
     iterator = 500
-    for i in range(0, len(arxiv_ids), iterator):
+    for i in tqdm(range(0, len(arxiv_ids), iterator)):
         ids = arxiv_ids[i:i + iterator]
         ids = [f'ARXIV:{id_}' for id_ in ids]
-        semantic_scholar_results = fetch_paper_ids(ids, max_retries=3)
-        pdb.set_trace()
-        assert 'failed' != semantic_scholar_results
+        failed_response, semantic_scholar_results = fetch_paper_ids(ids)
+        if failed_response == "failed":
+            print(f"Failed to fetch results for IDs: {ids}")
+            failed_paper_ids.extend(ids)
+            continue
 
         for df_details, result in zip(df_keys[i:i + iterator], semantic_scholar_results):
             try:
-                result = {i: result['tldr']['text'] if i=='tldr' else result[i] for i in result.keys()}
-                paper_results.append({'id': df_details, **result})
+                if result is not None:
+                    result = {i: result['tldr']['text'] if i=='tldr' and result[i] is not None else result[i] for i in result.keys()}
+                    if result['tldr'] is None:
+                        result['tldr'] = "No TLDR available"
+                    paper_results.append({'id': df_details, **result})
+                else:
+                    failed_paper_ids.append(df_details)
             except Exception as e:
                 failed_paper_ids.append(df_details)
+
+    print(f'Total failed paper ids {len(failed_paper_ids)}')
 
     headers = ['id', 'citationCount', 'year', 'paperId', 'url', 'tldr']
     results_df = pd.DataFrame(paper_results, columns=headers)
     merged_df = pd.merge(results_df, df, on='id', how='inner')
 
-    if args.new_data:
+    if args_new_data:
         append_to_csv(merged_df, "data/arxiv_papers_with_semantic_scholar_ids.csv")
 
-        df_for_c_code = merged_df[['paperId', 'url', 'title', 'year', 'citationCount']]
+        df_for_c_code = merged_df[['paperId', 'url', 'title', 'year', 'citationCount', 'abstract']]
         append_to_csv(df_for_c_code, "data/semantic_scholar_paper_details_for_c_code.csv")
         
         append_to_json(failed_paper_ids, "data/arxiv_papers_with_no_sematic_scholar_ids.json")
@@ -127,7 +150,7 @@ def main():
         merged_df.to_csv("data/arxiv_papers_with_semantic_scholar_ids.csv")
         print(f'Total entries {len(merged_df)}')
 
-        df_for_c_code = merged_df[['paperId', 'url', 'title', 'year', 'citationCount']]
+        df_for_c_code = merged_df[['paperId', 'url', 'title', 'year', 'citationCount', 'abstract']]
         # df_for_c_code['title'] = df_for_c_code['title'].str.replace('\n', '')
         df_for_c_code.to_csv("data/semantic_scholar_paper_details_for_c_code.csv", index=False)
 

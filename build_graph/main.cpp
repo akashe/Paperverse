@@ -30,8 +30,10 @@ const double MIN_DANGLING_CONTRIBUTION = 1e-9;
 struct VertexProperties {
     string name;
     string url;
+    string id;
     int centrality;
     int year;
+    string abstract;
 };
 
 // Define the graph type
@@ -42,8 +44,10 @@ typedef graph_traits<Graph>::vertex_descriptor Vertex;
 struct PaperInfo {
     string title;
     string url;
+    string id;
     int year;
     int citationCount;
+    string abstract; // Added abstract field
 };
 
 // Global variables
@@ -55,6 +59,7 @@ int csv_lines_processed = 0;
 int csv_lines_skipped = 0;
 int json_lines_processed = 0;
 int json_lines_skipped = 0;
+int citing_nodes_created = 0;
 
 std::string ReplaceAll(std::string str, const std::string& from, const std::string& to) {
     size_t start_pos = 0;
@@ -115,7 +120,7 @@ void load_paper_info(const string& csv_filename) {
 
     while (getline(file, line)) {
         vector<string> fields = split_csv_line(line);
-        if (fields.size() < 5) {  // Adjusted number of expected columns
+        if (fields.size() < 6) {  // Adjusted number of expected columns
             cerr << "Skipping malformed line: " << line << endl;
             csv_lines_skipped++;
             continue;
@@ -128,11 +133,13 @@ void load_paper_info(const string& csv_filename) {
         string title = ReplaceAll(title_old, std::string("\"\""), std::string(" "));
         string year = fields[3];
         string citationCount = fields[4];
+        string abstract_old = fields[5];
+        string abstract = ReplaceAll(abstract_old, std::string("\n"), std::string(" "));
 
         try {
             int yearInt = stoi(year);
             int citationCountInt = stoi(citationCount);
-            PaperInfo info = {title, url, yearInt, citationCountInt};
+            PaperInfo info = {title, url, paperId, yearInt, citationCountInt, abstract};
             paper_info_map[paperId] = info;
 
             // Add node to graph
@@ -140,8 +147,10 @@ void load_paper_info(const string& csv_filename) {
             node_map[paperId] = v;
             g[v].name = title;
             g[v].url = url;
+            g[v].id = paperId; 
             g[v].centrality = citationCountInt;
             g[v].year = yearInt;
+            g[v].abstract = abstract; // Store abstract in vertex properties
             csv_lines_processed++;
         } catch (const std::invalid_argument& e) {
             cerr << "Invalid argument: " << e.what() << " in line: " << line << endl;
@@ -176,51 +185,67 @@ void parse_jsonl_file(const string& filename) {
             continue;
         }
 
-        auto citedPaperIdItr = d.FindMember("citedPaperId");
-        auto citingPaperItr = d.FindMember("citingPaper");
-        
-        if (citedPaperIdItr == d.MemberEnd() || !citedPaperIdItr->value.IsString() ||
-            citingPaperItr == d.MemberEnd() || !citingPaperItr->value.IsObject()) {
+        // Get citingPaperId
+        auto citingPaperIdItr = d.FindMember("citingPaperId");
+        if (citingPaperIdItr == d.MemberEnd() || !citingPaperIdItr->value.IsString()) {
             cerr << "Skipping malformed JSON line: " << line << endl;
             json_lines_skipped++;
             continue;
         }
+        string citing_paper_id = citingPaperIdItr->value.GetString();
 
-        auto& citingPaper = citingPaperItr->value;
-        auto citingPaperIdItr = citingPaper.FindMember("paperId");
-        auto citingPaperTitleItr = citingPaper.FindMember("title");
-        auto citingPaperYearItr = citingPaper.FindMember("year");
+        // Get citedPaper object
+        auto citedPaperItr = d.FindMember("citedPaper");
+        if (citedPaperItr == d.MemberEnd() || !citedPaperItr->value.IsObject()) {
+            cerr << "Skipping malformed JSON line: " << line << endl;
+            json_lines_skipped++;
+            continue;
+        }
+        const Value& citedPaper = citedPaperItr->value;
 
-        // Replace null values with defaults
-        string cited_paper_id = citedPaperIdItr->value.IsString() ? citedPaperIdItr->value.GetString() : "unknown";
-        string citing_paper_id = citingPaperIdItr->value.IsString() ? citingPaperIdItr->value.GetString() : "unknown";
-        string citing_paper_title = citingPaperTitleItr->value.IsString() ? escape_dot_string(citingPaperTitleItr->value.GetString()) : "unknown";
-        int citing_paper_year = citingPaperYearItr->value.IsInt() ? citingPaperYearItr->value.GetInt() : 0;
+        // Extract citedPaper fields
+        string cited_paper_id = citedPaper.HasMember("paperId") && citedPaper["paperId"].IsString() ? citedPaper["paperId"].GetString() : "unknown";
+        string cited_paper_title = citedPaper.HasMember("title") && citedPaper["title"].IsString() ? escape_dot_string(citedPaper["title"].GetString()) : "unknown";
+        int cited_paper_year = citedPaper.HasMember("year") && citedPaper["year"].IsInt() ? citedPaper["year"].GetInt() : 0;
+        int cited_paper_citations = citedPaper.HasMember("citationCount") && citedPaper["citationCount"].IsInt() ? citedPaper["citationCount"].GetInt() : 0;
+        string cited_paper_abstract_old = citedPaper.HasMember("abstract") && citedPaper["abstract"].IsString() ? citedPaper["abstract"].GetString() : "";
+        string cited_paper_abstract = ReplaceAll(cited_paper_abstract_old, std::string("\n"), std::string(" "));
 
         string url_start = "https://www.semanticscholar.org/paper/";
 
+        
+        
         lock_guard<mutex> lock(mtx);
         if (node_map.find(cited_paper_id) == node_map.end()) {
             // If the cited paper is not in the initial set, add it as an isolated node
             Vertex v = add_vertex(g);
             node_map[cited_paper_id] = v;
-            g[v].name = cited_paper_id; // Just adding the paper id as a node name
+            g[v].name = cited_paper_title;
             g[v].url = url_start + cited_paper_id;
-            g[v].centrality = 0;
-            g[v].year = 0;
+            g[v].centrality = cited_paper_citations;
+            g[v].year = cited_paper_year;
+            g[v].abstract = cited_paper_abstract; 
+            g[v].id = cited_paper_id; 
         }
         if (node_map.find(citing_paper_id) == node_map.end()) {
             // If the citing paper is not in the initial set, add it as an isolated node
             Vertex v = add_vertex(g);
             node_map[citing_paper_id] = v;
-            g[v].name = citing_paper_title;
+            g[v].name = citing_paper_id;
             g[v].url = url_start + citing_paper_id;
             g[v].centrality = 0;
-            g[v].year = citing_paper_year;
+            g[v].year = 0;
+            g[v].abstract = "";
+            g[v].id = citing_paper_id;
+            citing_nodes_created++;
         }
 
-//        add_edge(node_map[citing_paper_id], node_map[cited_paper_id], g);
-        add_edge(node_map[cited_paper_id], node_map[citing_paper_id], g);
+        // if ((node_map[citing_paper_id]["year"] - node_map[cited_paper_id]["year"]  == 1) || (node_map[citing_paper_id]["year"] - node_map[cited_paper_id]["year"]   == 0)) {
+        
+        add_edge(node_map[citing_paper_id], node_map[cited_paper_id], g);
+        // add_edge(node_map[cited_paper_id], node_map[citing_paper_id], g);
+
+        
 
         if (json_lines_processed % 100000 == 0) {
             cout << "Json lines processed: " << json_lines_processed << endl;
@@ -242,7 +267,10 @@ public:
         out << "[label=\"" << g[v].name << "\"";
         out << ", year=\"" << g[v].year << "\"";
         out << ", citationCount=\"" << g[v].centrality << "\"";
-        out << ", url=\"" << g[v].url << "\"]";
+        out << ", url=\"" << g[v].url << "\"";
+        out << ", id=\"" << g[v].id << "\"";
+        out << ", abstract=\"" << escape_dot_string(g[v].abstract) << "\"";
+        out << "]";
     }
 
 private:
@@ -344,17 +372,19 @@ void updateDotFile(const Graph& g, const std::unordered_map<string, double>& pag
     }
 
     // Write graph header
-    outfile << "digraph CitationNetwork {" << endl;
-    outfile << "  rankdir=LR;" << endl;
+    outfile << "digraph G {" << endl;
+    // outfile << "  rankdir=LR;" << endl;
 
     // Write nodes with properties
     graph_traits<Graph>::vertex_iterator vi, vi_end;
     for (tie(vi, vi_end) = vertices(g); vi != vi_end; ++vi) {
         string id = to_string(*vi);
-        outfile << "  " << id << " [label=\"" << g[*vi].name << "\"";
+        outfile << id << "[label=\"" << g[*vi].name << "\"";
         outfile << ", year=\"" << g[*vi].year << "\"";
         outfile << ", citationCount=\"" << g[*vi].centrality << "\"";
         outfile << ", url=\"" << g[*vi].url << "\"";
+        outfile << ", id=\"" << g[*vi].id << "\"";
+        outfile << ", abstract=\"" << escape_dot_string(g[*vi].abstract) << "\"";
         
         // Add PageRank value if available
         auto pageRankIt = pageRanks.find(id);
@@ -367,14 +397,14 @@ void updateDotFile(const Graph& g, const std::unordered_map<string, double>& pag
     // Write edges
     graph_traits<Graph>::edge_iterator ei, ei_end;
     for (tie(ei, ei_end) = edges(g); ei != ei_end; ++ei) {
-        outfile << "  " << source(*ei, g) << " -> " << target(*ei, g) << ";" << endl;
+        outfile << source(*ei, g) << " -> " << target(*ei, g) << ";" << endl;
     }
 
     outfile << "}" << endl;
     outfile.close();
 }
 
-void store_all_data(const Graph& g, const string& csv_filename, sqlite3* db, const std::unordered_map<string, double>& pageRanks) {
+void store_all_data(const Graph& g, sqlite3* db, const std::unordered_map<string, double>& pageRanks) {
     // Create tables
     const char* create_tables_sql = R"(
         CREATE TABLE IF NOT EXISTS Nodes (
@@ -383,21 +413,9 @@ void store_all_data(const Graph& g, const string& csv_filename, sqlite3* db, con
             year INTEGER,
             citationCount INTEGER,
             url TEXT,
-            pageRank REAL
+            pageRank REAL,
+            abstract TEXT
         );
-        
-        CREATE TABLE IF NOT EXISTS Paper_info (
-            arxiv_id TEXT,
-            citationCount INTEGER,
-            year INTEGER,
-            semantic_id TEXT,
-            url TEXT PRIMARY KEY,
-            abstract TEXT,
-            title TEXT,
-            published_date TEXT,
-            tldr TEXT
-        );
-        
         CREATE TABLE IF NOT EXISTS PaperEdges (
             source_id TEXT,
             target_id TEXT,
@@ -418,25 +436,27 @@ void store_all_data(const Graph& g, const string& csv_filename, sqlite3* db, con
     sqlite3_exec(db, "BEGIN TRANSACTION;", 0, 0, 0);
 
     cout << "Starting inserting into Nodes " << endl;
-    // Store nodes with PageRank
+    // Store nodes with PageRank and abstract
     sqlite3_stmt* node_stmt;
     const char* insert_node_sql = 
-        "INSERT OR REPLACE INTO Nodes (id, label, year, citationCount, url, pageRank) "
-        "VALUES (?, ?, ?, ?, ?, ?);";
+        "INSERT OR REPLACE INTO Nodes (id, label, year, citationCount, url, pageRank, abstract) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);";
     sqlite3_prepare_v2(db, insert_node_sql, -1, &node_stmt, 0);
 
     graph_traits<Graph>::vertex_iterator vi, vi_end;
     for (tie(vi, vi_end) = vertices(g); vi != vi_end; ++vi) {
-        string id = to_string(*vi);
+        string id = g[*vi].id;
         sqlite3_bind_text(node_stmt, 1, id.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(node_stmt, 2, g[*vi].name.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_int(node_stmt, 3, g[*vi].year);
         sqlite3_bind_int(node_stmt, 4, g[*vi].centrality);
         sqlite3_bind_text(node_stmt, 5, g[*vi].url.c_str(), -1, SQLITE_STATIC);
         
-        auto pageRankIt = pageRanks.find(id);
+        auto pageRankIt = pageRanks.find(to_string(*vi));
         double pageRankValue = pageRankIt != pageRanks.end() ? pageRankIt->second : 0.0;
         sqlite3_bind_double(node_stmt, 6, pageRankValue);
+
+        sqlite3_bind_text(node_stmt, 7, g[*vi].abstract.c_str(), -1, SQLITE_STATIC);
         
         sqlite3_step(node_stmt);
         sqlite3_reset(node_stmt);
@@ -452,8 +472,8 @@ void store_all_data(const Graph& g, const string& csv_filename, sqlite3* db, con
 
     graph_traits<Graph>::edge_iterator ei, ei_end;
     for (tie(ei, ei_end) = edges(g); ei != ei_end; ++ei) {
-        string source_id = to_string(source(*ei, g));
-        string target_id = to_string(target(*ei, g));
+        string source_id = g[source(*ei, g)].id;
+        string target_id = g[target(*ei, g)].id;
         
         sqlite3_bind_text(edge_stmt, 1, source_id.c_str(), -1, SQLITE_STATIC);
         sqlite3_bind_text(edge_stmt, 2, target_id.c_str(), -1, SQLITE_STATIC);
@@ -463,113 +483,69 @@ void store_all_data(const Graph& g, const string& csv_filename, sqlite3* db, con
     }
     sqlite3_finalize(edge_stmt);
 
-    cout << "Starting inserting into Paper_info " << endl;
-    // Store paper info from CSV
-    ifstream csv_file(csv_filename);
-    if (csv_file.is_open()) {
-        string header;
-        getline(csv_file, header);
-
-        sqlite3_stmt* paper_stmt;
-        const char* insert_paper_sql = 
-            "INSERT OR IGNORE INTO Paper_info "
-            "(arxiv_id, citationCount, year, semantic_id, url, abstract, title, published_date, tldr) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
-        sqlite3_prepare_v2(db, insert_paper_sql, -1, &paper_stmt, 0);
-
-        string line;
-        int line_number = 1;
-        int error_count = 0;
-        const int MAX_ERRORS = 10;
-
-        while (getline(csv_file, line)) {
-            try {
-                auto fields = split_csv_line(line);
-                if (fields.size() >= 11) {  // Need at least 11 fields now (2 row numbers + 9 actual fields)
-                    // Convert citation count and year using correct indices
-                    int citationCount = 0;
-                    int year = 0;
-                    
-                    try {
-                        fields[3].erase(0, fields[3].find_first_not_of(" \n\r\t"));  // CitationCount is 4th field
-                        fields[3].erase(fields[3].find_last_not_of(" \n\r\t") + 1);
-                        fields[4].erase(0, fields[4].find_first_not_of(" \n\r\t"));  // Year is 5th field
-                        fields[4].erase(fields[4].find_last_not_of(" \n\r\t") + 1);
-
-                        citationCount = stoi(fields[3]);
-                        year = stoi(fields[4]);
-                        error_count = 0;
-                    } catch (const std::exception& e) {
-                        error_count++;
-                        if (error_count <= MAX_ERRORS) {
-                            cout << "Conversion error at line " << line_number << ": " << e.what() << endl;
-                            cout << "Citation count: '" << fields[3] << "'" << endl;
-                            cout << "Year: '" << fields[4] << "'" << endl;
-                        }
-                        if (error_count == MAX_ERRORS) {
-                            cout << "Suppressing further conversion errors..." << endl;
-                        }
-                        continue;
-                    }
-
-                    // Ensure all text fields are properly stripped of quotes
-                    for (int i = 2; i < fields.size(); i++) {  // Start from field 3 (arxiv_id)
-                        if (i != 3 && i != 4) {  // Skip citation count and year fields
-                            auto& field = fields[i];
-                            if (!field.empty() && field.front() == '"') {
-                                field = field.substr(1);
-                            }
-                            if (!field.empty() && field.back() == '"') {
-                                field.pop_back();
-                            }
-                        }
-                    }
-
-                    // Bind all fields to the SQL statement with correct indices
-                    sqlite3_bind_text(paper_stmt, 1, fields[2].c_str(), -1, SQLITE_STATIC);  // arxiv_id
-                    sqlite3_bind_int(paper_stmt, 2, citationCount);
-                    sqlite3_bind_int(paper_stmt, 3, year);
-                    sqlite3_bind_text(paper_stmt, 4, fields[5].c_str(), -1, SQLITE_STATIC);  // semantic_id
-                    sqlite3_bind_text(paper_stmt, 5, fields[6].c_str(), -1, SQLITE_STATIC);  // url
-                    sqlite3_bind_text(paper_stmt, 6, fields[7].c_str(), -1, SQLITE_STATIC);  // title
-                    sqlite3_bind_text(paper_stmt, 7, fields[8].c_str(), -1, SQLITE_STATIC);  // published_date
-                    sqlite3_bind_text(paper_stmt, 8, fields[9].c_str(), -1, SQLITE_STATIC);  // abstract
-                    sqlite3_bind_text(paper_stmt, 9, fields[10].c_str(), -1, SQLITE_STATIC); // tldr
-                    
-                    sqlite3_step(paper_stmt);
-                    sqlite3_reset(paper_stmt);
-                }
-            } catch (const std::exception& e) {
-                cout << "Error processing line " << line_number << ": " << e.what() << endl;
-                cout << "Line content: " << line << endl;
-            }
-            line_number++;
-        }
-        sqlite3_finalize(paper_stmt);
-        csv_file.close();
-    }
     // Commit all changes
     sqlite3_exec(db, "COMMIT;", 0, 0, 0);
 }
 
+
+void export_graph_to_csv(const Graph& g, const std::unordered_map<string, double>& pageRanks,
+                        const string& nodes_csv_path = "data/citation_nodes.csv",
+                        const string& edges_csv_path = "data/citation_edges.csv") {
+    // Write Nodes CSV
+    ofstream nodes_csv(nodes_csv_path);
+    nodes_csv << "id,label,year,citationCount,url,pageRank,abstract\n";
+    graph_traits<Graph>::vertex_iterator vi, vi_end;
+    for (tie(vi, vi_end) = vertices(g); vi != vi_end; ++vi) {
+        string id = g[*vi].id;
+        string label = g[*vi].name;
+        int year = g[*vi].year;
+        int citationCount = g[*vi].centrality;
+        string url = g[*vi].url;
+        double pageRankValue = 0.0;
+        auto pageRankIt = pageRanks.find(to_string(*vi));
+        if (pageRankIt != pageRanks.end()) pageRankValue = pageRankIt->second;
+        string abstract_str = g[*vi].abstract;
+        // Escape quotes for CSV
+        std::replace(label.begin(), label.end(), '"', '\'');
+        std::replace(abstract_str.begin(), abstract_str.end(), '"', '\'');
+
+        std::replace(label.begin(), label.end(), '\\', '/');
+        std::replace(abstract_str.begin(), abstract_str.end(), '\\', '/');
+        nodes_csv << '"' << id << "\",\"" << label << "\"," << year << "," << citationCount << ",\"" << url << "\"," << pageRankValue << ",\"" << abstract_str << "\"\n";
+    }
+    nodes_csv.close();
+
+    // Write Edges CSV
+    ofstream edges_csv(edges_csv_path);
+    edges_csv << "source_id,target_id\n";
+    graph_traits<Graph>::edge_iterator ei, ei_end;
+    for (tie(ei, ei_end) = edges(g); ei != ei_end; ++ei) {
+        string source_id = g[source(*ei, g)].id;
+        string target_id = g[target(*ei, g)].id;
+        edges_csv << '"' << source_id << "\",\"" << target_id << "\"\n";
+    }
+    edges_csv.close();
+}
+
 int main() {
-    // g++ -std=c++11 -I$BOOST_INCLUDE_PATH -I$RAPIDJSON_INCLUDE_PATH -I /Users/akashkumar/Downloads/eigen-3.4.0 -L$BOOST_LIB_PATH -lboost_graph -lboost_system -lsqlite3 -o citation_network_new main.cpp
+    // g++ -std=c++11 -I$BOOST_INCLUDE_PATH -I$RAPIDJSON_INCLUDE_PATH -L$BOOST_LIB_PATH -lboost_graph -lboost_system -I /Users/akashkumar/Downloads/eigen-3.4.0  -lsqlite3 -o build_graph/citation_network build_graph/main.cpp
     auto start_time = chrono::high_resolution_clock::now();
 
     // Load paper information from cleaned CSV file
-    string csv_filename = "data/semantic_scholar_paper_details_for_c_code.csv";
+    string csv_filename = "data/semantic_scholar_paper_details_pruned_for_c_code.csv";
     load_paper_info(csv_filename);
 
     cout << "CSV lines processed: " << csv_lines_processed << ", CSV lines skipped: " << csv_lines_skipped << endl;
 
     // Parse the JSONL file to build the graph
-    string jsonl_filename = "data/citations.jsonl";
+    string jsonl_filename = "data/references_complete_pruned.jsonl";
     parse_jsonl_file(jsonl_filename);
 
     cout << "JSON lines processed: " << json_lines_processed << ", JSON lines skipped: " << json_lines_skipped << endl;
+    cout << "Citing nodes created (not present in initial graph): " << citing_nodes_created << endl;
 
     // Save the graph to a file with custom property writer
-    ofstream dotfile("../citation-network-backend/data/citation_network.dot");
+    ofstream dotfile("data/citation_network.dot");
     write_graphviz(dotfile, g, VertexPropertyWriter(g));
 
     cout << "Graph construction complete. Nodes: " << num_vertices(g) << ", Edges: " << num_edges(g) << endl;
@@ -590,7 +566,7 @@ int main() {
 
     // Update dot file with PageRank values
     cout << "Updating dot file..." << endl;
-    updateDotFile(g, pageRanks, "../citation-network-backend/data/citation_network_with_pagerank.dot");
+    updateDotFile(g, pageRanks, "data/citation_network_with_pagerank.dot");
     cout << "Dot file update complete" << endl;
 
     auto mid_time_2 = chrono::high_resolution_clock::now();
@@ -599,8 +575,8 @@ int main() {
 
     // Store everything in database
     sqlite3* db;
-    if (sqlite3_open("../citation-network-backend/data/citations_data.db", &db) == SQLITE_OK) {
-        store_all_data(g, "data/arxiv_papers_with_semantic_scholar_ids.csv", db, pageRanks);
+    if (sqlite3_open("data/citations_data.db", &db) == SQLITE_OK) {
+        store_all_data(g, db, pageRanks);
         sqlite3_close(db);
         cout << "Database population complete" << endl;
     } else {
@@ -611,6 +587,12 @@ int main() {
     auto mid_time_3 = chrono::high_resolution_clock::now();
     chrono::duration<double> db_duration = mid_time_3 - mid_time_2;
     cout << "Total time for creating and saving info in database " << db_duration.count() << " seconds" << endl;
+
+    export_graph_to_csv(g, pageRanks, "data/citation_nodes.csv", "data/citation_edges.csv");
+
+    auto mid_time_4 = chrono::high_resolution_clock::now();
+    chrono::duration<double> csv_file_duration = mid_time_4 - mid_time_3;
+    cout << "Total time for saving new dot file " << csv_file_duration.count() << " seconds" << endl;
 
     auto end_time = chrono::high_resolution_clock::now();
     chrono::duration<double> total_duration = end_time - start_time;

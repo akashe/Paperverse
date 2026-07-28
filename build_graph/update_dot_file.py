@@ -8,16 +8,18 @@ def fix_dot_format(input_file, output_file):
                 .replace("\r", "") \
                 .replace(r'\"', "")\
                 .replace('""', '"')\
-                .replace(r'\\', "")
+                .replace(r'\\', "")\
+                .replace('\
+', '') \
             # Fix the format of edges
-            if '->' in line:
-                line = line.replace(' ;', ';').replace('->', ' -> ')
+            # if '->' in line:
+            #     line = line.replace(' ;', ';').replace('->', ' -> ')
             outfile.write(line + '\n')
 
 
 # Specify the input and output file paths
-input_file = 'data/citation_network.dot'
-output_file = 'data/citation_network_fixed.dot'
+input_file = 'data/citation_network_with_pagerank.dot'
+output_file = 'data/citation_network_with_pagerank_fixed.dot'
 
 # Run the function to fix the DOT file format
 fix_dot_format(input_file, output_file)

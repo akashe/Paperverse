@@ -52,7 +52,7 @@ function PathGraph({ paths, isPathFinder }) {
       const addNode = async (nodeId) => {
         if (!nodesMap.has(nodeId)) {
           try {
-            const response = await axios.post('/get_paper_info/', { paper_id: parseInt(nodeId) });
+            const response = await axios.post('/get_paper_info/', { paper_id: nodeId });
             const paper = response.data;
             const node = {
               data: {
@@ -107,7 +107,7 @@ function PathGraph({ paths, isPathFinder }) {
         const nodeId = evt.target.id();
         const nodePosition = evt.target.renderedPosition();
         axios
-          .post('/get_paper_info/', { paper_id: parseInt(nodeId) })
+          .post('/get_paper_info/', { paper_id: nodeId })
           .then((response) => {
             setTooltip({
               open: true,

@@ -45,67 +45,116 @@ Click on any paper to discover its most influential derivatives. Perfect for:
 <img src="build_graph/pngs/multi_level.png" alt="Multi level" width="900" height="500"/>  
 </p>
 
-## 🚀 Getting Started
+## How it works
 
-### 1. Backend Setup (FastAPI)
-   
-Run FASTAPI backend app:
 ```
-cd citation-network-backend
-mkdir data
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt 
+                    ┌────────────────────────────┐
+                    │   Neo4j (Community + GDS)  │
+                    │  shared with ResearchQuest  │
+                    └──────────────┬──────────────┘
+                                   │ Cypher, bolt+s
+                    ┌──────────────┴──────────────┐
+                    │  citation-network-backend    │
+                    │  (FastAPI)                   │
+                    └──────────────┬──────────────┘
+                                   │ /api/*
+                    ┌──────────────┴──────────────┐
+                    │  citation-network-ui         │
+                    │  (React, served by nginx)    │
+                    │  Firebase — auth + reading    │
+                    │  list only, not the graph      │
+                    └─────────────────────────────┘
+```
 
+Paperverse and [ResearchQuest](https://github.com/akashe/ResearchQuest) both
+explore the same underlying citation graph and now share one Neo4j instance
+instead of each maintaining a separate copy of the data. The backend here
+runs Cypher queries directly against it — no local database file, nothing
+to download or keep in sync by hand.
+
+Paper ids throughout are Semantic Scholar's own paper ids (opaque hash
+strings), not sequential integers — this is a Neo4j-native identifier, a
+change from this project's original SQLite-backed version.
+
+## Repo layout
+
+- `citation-network-backend/` — FastAPI backend, Cypher queries over Neo4j
+- `citation-network-ui/` — React frontend (search, graph explorer, path
+  finder, reading list); Firebase handles auth and the reading list only —
+  none of the citation-graph data goes through Firebase
+- `build_graph/` — the original arXiv → Semantic Scholar → graph-export
+  pipeline this project was built around (see **Known constraints** below
+  for where this is headed)
+- `docker-compose.yml` / `docker-compose.prod.yml` / `docker/` — local dev
+  and shared-VM deployment (see **Deployment**)
+
+## Local setup
+
+### Backend (FastAPI)
+
+```bash
+cd citation-network-backend
+pip install -r requirements.txt
+cp ../.env.example ../.env   # fill in NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
 uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-> 💡 Download the demo database from [here](s3://gifs-and-vids/citations_data.db) and place it in the `data` folder.
-   
+Point `NEO4J_URI` at any Neo4j instance that already has the `:Paper`
+graph loaded — see ResearchQuest's `docker-compose.yml` for a self-hosted
+Neo4j + GDS setup, or run your own via `build_graph/`.
 
-### 2. Frontend Setup (React)
-
-#### Prerequisites
-Ensure you have Node.js and npm installed:
-   
-```bash
-node --version
-npm --version
-```
-
-#### Installation Options
-
-**macOS:**
-```bash
-brew install node
-```
-
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt update
-sudo apt install nodejs npm
-```
-
-#### Environment Configuration
-1. Create `.env` in `citation-network-ui`
-2. Copy from `.env.example` and configure:
-```
-REACT_APP_FIREBASE_API_KEY=your_api_key_here
-REACT_APP_FIREBASE_AUTH_DOMAIN=your_auth_domain_here
-REACT_APP_FIREBASE_PROJECT_ID=your_project_id_here
-REACT_APP_FIREBASE_STORAGE_BUCKET=your_storage_bucket_here
-REACT_APP_FIREBASE_MESSAGING_SENDER_ID=your_sender_id_here
-REACT_APP_FIREBASE_APP_ID=your_app_id_here
-REACT_APP_FIREBASE_MEASUREMENT_ID=your_measurement_id_here
-```
-
-#### Launch Frontend
+### Frontend (React)
 
 ```bash
 cd citation-network-ui
 npm install
-npm start -- --host 0.0.0.0
+cp .env.example .env   # Firebase config — see below
+npm start
 ```
+
+Firebase (`REACT_APP_FIREBASE_*` in `.env`) is only used for login and the
+reading-list feature. The app degrades gracefully without it — search,
+graph exploration, and path finding all work with no Firebase config at
+all (see `citation-network-ui/src/firebase.js`).
+
+## Deployment
+
+Runs alongside ResearchQuest on the same Hetzner VM, as a separate
+`docker compose` project (`docker-compose.prod.yml`) — not its own server.
+Two containers, `frontend` and `backend`, with no host ports published at
+all: ResearchQuest's own nginx (already TLS-terminating Neo4j's bolt
+connection for its Streamlit app) reaches Paperverse's `frontend` container
+directly over a shared Docker network, and adds a second HTTPS server block
+for `paperverse.co` alongside its existing one.
+
+The domain itself is registered via AWS but its authoritative nameservers
+are Cloudflare's — DNS changes happen in the Cloudflare dashboard, not
+Route53 (a leftover, non-authoritative hosted zone exists there from an
+earlier AWS-only deployment and can be ignored). TLS certificates are
+issued by Let's Encrypt via `certbot --webroot`, auto-renewing through the
+same mechanism ResearchQuest's own nip.io endpoint uses.
+
+The VM's own address isn't published here — Neo4j's bolt endpoint has to
+stay reachable from Streamlit Cloud's servers (which have no fixed egress
+IPs to allowlist), so that port has to stay open to the internet, and
+there's no reason to make it an easy target for scanners that scrape public
+repos. Auth + TLS are the real protection either way.
+
+## Known constraints
+
+- Citation data originates from Semantic Scholar's API, which restricts
+  bulk redistribution of derived data. A meaningful fraction of papers in
+  the graph — specifically ones that entered it only through citation
+  expansion, rather than being one of the originally-fetched arXiv papers —
+  don't have a title/abstract/publish-date match in Semantic Scholar's
+  arXiv metadata, so fields like TL;DR and published date show as
+  unavailable for them. A migration to [OpenAlex](https://openalex.org)
+  (CC0-licensed, indexes arXiv ids natively, ships as a bulk downloadable
+  snapshot rather than a rate-limited API) is the leading candidate to
+  close this gap and also enable publishing a derived dataset publicly —
+  not yet done.
+- Very recent papers naturally have few incoming citation edges yet — a
+  property of citation graphs generally, not a data quality bug.
 
 ## 🛠️ Graph Building Pipeline
 
@@ -115,4 +164,4 @@ The `build_graph` directory contains tools to create citation networks through t
 2. **Citation Analysis**: Gather citation data from Semantic Scholar
 3. **Graph Generation**: Create DOT files with papers as nodes and citations as edges
 4. **Ranking**: Apply PageRank to identify influential papers
-5. **Database Integration**: Process and store graph data for FastAPI backend
+5. **Database Integration**: Process and export graph data for Neo4j

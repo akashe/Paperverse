@@ -18,7 +18,12 @@ const useStyles = makeStyles({
     height: '80vh', // Change to viewport height
     width: '100%',
     marginTop: '20px',
-    overflow: 'auto', // Enable scrolling
+    // Cytoscape's `fit: true` layout already rescales the graph to match
+    // this container, so a scrollbar is never actually needed — but with
+    // `overflow: auto` one could still appear/disappear at the sizing
+    // boundary, shrinking/growing the container width each time, which
+    // retriggers `fit` and flickers the scrollbar in a feedback loop.
+    overflow: 'hidden',
   },
   tooltipCard: {
     // pointerEvents: 'none',
@@ -78,9 +83,9 @@ function Graph({ rootNode, depth, numPapers, selectionCriteria }) {
   const loadChildren = (nodeId) => {
     axios
       .post('/get_children/', {
-        paper_id: parseInt(nodeId),
+        paper_id: nodeId,
         depth: parseInt(depth),
-        root_id: parseInt(rootNode.id),
+        root_id: rootNode.id,
         num_papers: parseInt(numPapers),
         selection_criteria: selectionCriteria,
       })
@@ -251,7 +256,7 @@ function Graph({ rootNode, depth, numPapers, selectionCriteria }) {
         const nodeId = evt.target.id();
         const nodePosition = evt.target.renderedPosition();
         axios
-          .post('/get_paper_info/', { paper_id: parseInt(nodeId) })
+          .post('/get_paper_info/', { paper_id: nodeId })
           .then((response) => {
             setTooltip({
               open: true,

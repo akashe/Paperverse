@@ -1,4 +1,5 @@
 venv/
+.venv/
 data/
 tmp/
 bin/
@@ -22,3 +23,4 @@ graph_bfs
 pagerank
 .vscode
 citation-network-ui/build/*
+llm_sessions/*

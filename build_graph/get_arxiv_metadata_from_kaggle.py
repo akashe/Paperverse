@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import argparse
 import os
+import pdb
 
 # Relevant categories for machine learning-related papers
 RELEVANT_CATEGORIES = {"cs.CV", "cs.AI", "cs.LG", "cs.CL", "cs.NE", "stat.ML", "cs.IR"}
@@ -95,7 +96,7 @@ def process_and_filter_new_data(filepath, existing_ids, relevant_categories, yea
 
     return filtered_data
 
-def analyze_dates(filepath, months=7):
+def analyze_dates(filepath, relevant_categories, months=7):
     """Analyze paper dates from the last N months."""
     cutoff_date = datetime.now() - timedelta(days=months * 30)
     date_counts = {}
@@ -110,9 +111,10 @@ def analyze_dates(filepath, months=7):
                 update_date = datetime.strptime(entry['update_date'], "%Y-%m-%d")
                 
                 if update_date >= cutoff_date:
-                    month_key = update_date.strftime("%Y-%m")
-                    date_counts[month_key] = date_counts.get(month_key, 0) + 1
-                    total_count += 1
+                    if any(category in relevant_categories for category in entry['categories'].split()):
+                        month_key = update_date.strftime("%Y-%m")
+                        date_counts[month_key] = date_counts.get(month_key, 0) + 1
+                        total_count += 1
                 
                 if total_count % 100000 == 0:
                     print(f"Processed {total_count} relevant papers...")
@@ -133,7 +135,7 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--save_file_name", type=str, help="File name to save the filtered results",
                         default="arxiv_data.pkl")
     parser.add_argument("-y", "--years", type=int, help="Number of past years to include", default=10)
-    parser.add_argument("-n", "--new_file", type=str, help="Path to new Arxiv JSON metadata file")
+    parser.add_argument("-n", "--new_file", type=str, help="Path to new Arxiv JSON metadata file", default=None)
     parser.add_argument("--analyze", action="store_true", help="Analyze dates only")
     args = parser.parse_args()
 
@@ -142,13 +144,13 @@ if __name__ == "__main__":
     years = args.years
 
     if args.analyze:
-        analyze_dates(args.file)
+        analyze_dates(args.file, RELEVANT_CATEGORIES, months=years * 12)
         exit()
 
     if args.new_file is None:
         data = load_json(args.file)
         filtered_data = filter_data(data, RELEVANT_CATEGORIES, args.years)
-        save_data(filtered_data, args.save_file_name)
+        save_data(filtered_data, os.path.join("data", args.save_file_name))
     else:
         # Load existing IDs from the original filtered data
         existing_ids = load_existing_ids(os.path.join("data", args.save_file_name))
@@ -163,5 +165,5 @@ if __name__ == "__main__":
         )
         
         # Save new entries to a separate file
-        save_data(new_filtered_data, "data/arxiv_data_new.pkl")
+        save_data(new_filtered_data, os.path.join("data", args.new_file))
         print(f"Found {len(new_filtered_data)} new papers")
